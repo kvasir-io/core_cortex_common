@@ -17,9 +17,6 @@ A core (`core_cortex_m0plus`, `core_cortex_m33`) has this repository as the subm
 `src/cortex_common`, and its `src/core/*.hpp` include `cortex_common/*.hpp`. Nothing above the
 core layer names it.
 
-In the Kvasir work tree the master checkout is `chip_rp2350/core/src/cortex_common`;
-`just link cortex_common` in `chip_rp2040` or `chip_atsamd21` replaces theirs with a symlink to it.
-
 What differs between cores comes from the core's `core.svd`, whose priority fields cover only the
 implemented bits. It has to provide:
 
@@ -30,4 +27,4 @@ implemented bits. It has to provide:
 
 ## Tests
 
-    just test        # or: cmake -S tests -B build && cmake --build build && ctest --test-dir build
+    cmake -S tests -B build && cmake --build build && ctest --test-dir build
