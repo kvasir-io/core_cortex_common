@@ -15,7 +15,7 @@
 namespace Kvasir {
 namespace SystemControl {
     // What SYSRESETREQ resets is the chip's choice: on the RP2040 and RP2350 only this core.
-    // A whole-chip reboot there is Kvasir::reboot().
+    // A whole-chip reboot there is Kvasir::Bootrom::reboot().
     using SystemReset = decltype(Kvasir::Peripheral::SCB::Registers<>::AIRCR::overrideDefaults(
       write(Kvasir::Peripheral::SCB::Registers<>::AIRCR::VECTKEYValC::request_reset),
       write(Kvasir::Peripheral::SCB::Registers<>::AIRCR::SYSRESETREQValC::request_reset)));
