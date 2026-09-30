@@ -20,6 +20,8 @@ void check(bool        ok,
     }
 }
 
+using Kvasir::Systick::Detail::joinHalves;
+using Kvasir::Systick::Detail::OverrunCounter;
 using Kvasir::Systick::Detail::pairReading;
 
 struct SimTick {
@@ -53,6 +55,26 @@ int main() {
     check(pairReading(3, 2, true, 3, reload) == 3U * 1000U + 997U,
           "pending, counter near zero: the wrap came after the read");
     check(pairReading(0, reload, false, 0, reload) == 0U, "the start");
+
+    // The 64-bit count as two halves.
+    check(joinHalves(7, 0xFFFF'FFFFU, 7) == 0x7'FFFF'FFFFULL, "halves join");
+    check(!joinHalves(7, 0U, 8).has_value(), "the high half moved: retry");
+    {
+        OverrunCounter<std::uint64_t> wide;
+        wide.preset(0xFFFF'FFFEULL);
+        wide.increment();
+        check(wide.load() == 0xFFFF'FFFFULL, "below the low half's wrap");
+        wide.increment();
+        check(wide.load() == 0x1'0000'0000ULL,
+              "the low half wraps into the high one",
+              (long long)wide.load());
+        wide.increment();
+        check(wide.load() == 0x1'0000'0001ULL, "and counts on");
+        OverrunCounter<std::uint32_t> narrow;
+        narrow.increment();
+        narrow.increment();
+        check(narrow.load() == 2U, "the 32-bit counter");
+    }
 
     // Every instant of four periods, latencies up to 40 % of a reload, sample gaps up to 3 ticks.
     long long accepted = 0;

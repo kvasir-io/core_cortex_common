@@ -152,7 +152,7 @@ namespace Systick {
         }
 
         using overrunT = GetOverrunTypeT<calcOverRunValue(ClockSpeed, Config::minOverrunTime)>;
-        static inline std::atomic<overrunT> overruns{};
+        static inline Detail::OverrunCounter<overrunT> overruns{};
 
         // A synchronised clock adds an epoch so it reads the same as a clock on another core.
         static constexpr bool Synchronised = [] {
@@ -172,10 +172,10 @@ namespace Systick {
             using Icsr                        = Kvasir::Peripheral::SCB::Registers<>::ICSR;
 
             while(true) {
-                overrunT const      before  = overruns.load(std::memory_order_relaxed);
+                overrunT const      before  = overruns.load();
                 std::uint32_t const count   = apply(read(Regs::CVR::current));
                 bool const          pending = fieldEquals(Icsr::PENDSTSETValC::set_pending);
-                overrunT const      after   = overruns.load(std::memory_order_relaxed);
+                overrunT const      after   = overruns.load();
                 if(auto const ticks
                    = Detail::pairReading(before, count, pending, after, reloadValue))
                 {
@@ -184,18 +184,14 @@ namespace Systick {
             }
         }
 
-        static void onIsr() {
-            overrunT old = overruns.load(std::memory_order_relaxed);
-            ++old;
-            overruns.store(old, std::memory_order_relaxed);
-        }
+        static void onIsr() { overruns.increment(); }
 
         static void delay_ticks(std::uint32_t ticksToWait) {
             std::uint32_t const countStart    = apply(read(Regs::CVR::current));
-            overrunT const      overrunsStart = overruns.load(std::memory_order_relaxed);
+            overrunT const      overrunsStart = overruns.load();
             while(true) {
                 std::uint32_t const countNow    = apply(read(Regs::CVR::current));
-                overrunT const      overrunsNow = overruns.load(std::memory_order_relaxed);
+                overrunT const      overrunsNow = overruns.load();
                 auto const          countsRaw   = std::int32_t(countStart - countNow);
                 // Across a reload the counter passed 0 and reloadValue: reloadValue + 1 counts.
                 std::uint32_t const countsElapsed
