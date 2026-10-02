@@ -270,9 +270,6 @@ namespace Kvasir { namespace Startup {
         template<unsigned V>
         inline constexpr bool writesUnknownValue<Register::WriteRuntimeAndLiteralAction<V>> = true;
 
-        template<>
-        inline constexpr bool writesUnknownValue<Register::XorAction> = true;
-
         template<unsigned V>
         inline constexpr bool writesUnknownValue<Register::XorLiteralAction<V>> = true;
     }   // namespace Detail
