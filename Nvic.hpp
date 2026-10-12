@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstddef>
 #include <type_traits>
 #include <utility>
 
@@ -99,6 +100,24 @@ namespace Kvasir { namespace Nvic {
                           "interrupt priority out of range for this core: 0-3 on a Cortex-M0+, "
                           "0-15 on the RP2350's Cortex-M33");
             return write(Field::pri, Register::value<Priority>());
+        }
+
+        template<std::size_t... I>
+        [[gnu::always_inline]] inline void clearEnablesAndPending(std::index_sequence<I...>) {
+            (apply(write(NvicRegs::ICER<I>::FULLREGISTER, 0xFFFF'FFFFU)), ...);
+            (apply(write(NvicRegs::ICPR<I>::FULLREGISTER, 0xFFFF'FFFFU)), ...);
+        }
+
+        // Every enable and pending bit of the chip's interrupts cleared: NVIC_ICERn / NVIC_ICPRn, one word per 32
+        // interrupts up to the chip's last (InterruptOffsetTraits). A word past them holds no interrupt (Armv6-M ARM
+        // DDI0419E B3.4: one NVIC_ICER / NVIC_ICPR; Armv8-M ARM DDI0553B.y D1.2.183/184: n = 0 - 15, "Bits
+        // corresponding to unimplemented interrupts are RES0").
+        [[gnu::always_inline]] inline void clearAllEnablesAndPending() {
+            constexpr auto end = InterruptOffsetTraits<void>::end;
+            static_assert(end > 0, "a chip with no interrupt");
+            clearEnablesAndPending(
+              std::make_index_sequence<(static_cast<std::size_t>(end) + 31) / 32>{});
+            asm volatile("dsb\n isb" ::: "memory");
         }
 
     }   // namespace Detail
