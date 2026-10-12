@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 namespace Kvasir {
 namespace SystemControl {
@@ -97,6 +98,43 @@ namespace Nvic {
               "Unable to set priority on this interrupt, index is out of range");
             return write(Field, Register::value<Priority>());
         }
+
+        // Word `index` of a register run, read through the register layer: a word access whatever
+        // the caller wants from it, and the host mock sees it. No match (index past the run) reads 0.
+        template<typename... Regs>
+        std::uint32_t readWord(unsigned index,
+                               brigand::list<Regs...>) {
+            std::uint32_t word{};
+            unsigned      i{};
+            (void)(((i++ == index)
+                    && (word = Register::Detail::GetAddress<typename Regs::Addr>::read(), true))
+                   || ...);
+            return word;
+        }
+
+        template<std::size_t... I>
+        constexpr auto iprList(std::index_sequence<I...>) {
+            return brigand::list<NvicRegs::IPR<I>...>{};
+        }
+
+        // The IPR words the chip's interrupts reach.
+        using IprWords = decltype(iprList(
+          std::make_index_sequence<(InterruptOffsetTraits<void>::end + 3) / 4>{}));
+
+        // SHPR words from the one holding exception 4 * first; SHPR1 (exceptions 4..7) is not on a
+        // Cortex-M0+, which has none of those exceptions.
+        template<typename S>
+        struct ShprWords {
+            static constexpr unsigned first = 2;
+            using type                      = brigand::list<typename S::SHPR2, typename S::SHPR3>;
+        };
+
+        template<typename S>
+            requires requires { typename S::SHPR1; }
+        struct ShprWords<S> {
+            static constexpr unsigned first = 1;
+            using type = brigand::list<typename S::SHPR1, typename S::SHPR2, typename S::SHPR3>;
+        };
     }   // namespace Detail
 
     template<int Priority>
@@ -124,12 +162,20 @@ namespace Nvic {
             asm volatile("mrs %0, ipsr" : "=r"(ipsr));
             if(ipsr == 0) { return 0; }
             if(ipsr < 4) { return static_cast<int>(ipsr) - 4; }
-            // Offset from SHPR2: a Cortex-M0+ SVD has no SHPR1.
-            std::uint32_t const address = ipsr >= 16
-                                          ? Detail::NvicRegs::IPR<0>::Addr::value + (ipsr - 16)
-                                          : Detail::ScbRegs::SHPR2::Addr::value - 4 + (ipsr - 4);
-            std::uint8_t const  byte    = *reinterpret_cast<std::uint8_t const volatile*>(address);
-            constexpr auto      mask    = Detail::NvicRegs::IPR<0>::template PRI<0>::pri.Mask;
+            // The word and its byte lane, not a byte load: on the Cortex-M0+ "all NVIC registers are
+            // only accessible using word transfers. Any attempt to read or write a halfword or byte
+            // individually is unpredictable" (RP2040 datasheet 2.4.5.1 "About the NVIC"), and the same
+            // for "all system control registers" (2.4.4.1), SHPR2/3 among them. A byte load there read
+            // a wrong level, and a per-level ISR policy then dropped every interrupt's log record as
+            // from a silent level.
+            // IPR<n> holds IRQs 4n..4n+3 (exceptions 16+4n..), SHPRk exceptions 4k..4k+3: the lane is
+            // ipsr % 4 in both. An exception before the first SHPR word wraps the index and reads 0.
+            using Shpr = Detail::ShprWords<Detail::ScbRegs>;
+            std::uint32_t const word
+              = ipsr >= 16 ? Detail::readWord(ipsr / 4 - 4, Detail::IprWords{})
+                           : Detail::readWord(ipsr / 4 - Shpr::first, typename Shpr::type{});
+            auto const     byte = static_cast<std::uint8_t>(word >> (8U * (ipsr % 4)));
+            constexpr auto mask = Detail::NvicRegs::IPR<0>::template PRI<0>::pri.Mask;
             return static_cast<int>(byte >> std::countr_zero(mask));
         }
     };
