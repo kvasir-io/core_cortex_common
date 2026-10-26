@@ -14,7 +14,7 @@ namespace Kvasir::Core {
 [[gnu::always_inline]] inline void sev() { asm volatile("sev" ::: "memory"); }
 
 // On Armv8-M a successful exclusive store on this core sets the event register (DDI0553
-// B9.3.1), so wfe() right after a std::atomic RMW, Spinlock or CriticalSection does not sleep:
+// B9.3.1), so wfe() right after a std::atomic RMW, Spinlock or IrqSpinlock does not sleep:
 // check with a plain load or register read, and re-check after waking.
 [[gnu::always_inline]] inline void wfe() { asm volatile("wfe" ::: "memory"); }
 

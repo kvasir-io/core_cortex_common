@@ -1,0 +1,8 @@
+// A stand-in <memory> for irq_state_syntax (std::addressof only).
+#pragma once
+namespace std {
+template<typename T>
+constexpr T* addressof(T& t) noexcept {
+    return __builtin_addressof(t);
+}
+}   // namespace std

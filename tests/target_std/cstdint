@@ -1,0 +1,7 @@
+// A stand-in <cstdint> for irq_state_syntax: the host's C++ library cannot be used for a bare-metal --target.
+#pragma once
+#include <stdint.h>
+namespace std {
+using ::uint32_t;
+using ::uint8_t;
+}   // namespace std

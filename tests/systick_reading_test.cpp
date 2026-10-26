@@ -3,9 +3,12 @@
 
 #include "SystickReading.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <type_traits>
+#include <vector>
 
 namespace {
 int failures = 0;
@@ -20,9 +23,55 @@ void check(bool        ok,
     }
 }
 
+using Kvasir::Systick::Detail::calcOverRunValue;
+using Kvasir::Systick::Detail::delayReached;
 using Kvasir::Systick::Detail::joinHalves;
 using Kvasir::Systick::Detail::OverrunCounter;
+using Kvasir::Systick::Detail::OverrunWordT;
 using Kvasir::Systick::Detail::pairReading;
+using Kvasir::Systick::Detail::waitInChunks;
+
+// The overrun counter's width (SystickReading.hpp OverrunWord): a 24-bit SysTick (2^24 ticks a wrap) counting
+// years(15) = 15 * 365.2425 days. Integer nanoseconds per wrap: 134'217'728 at 125 MHz, 111'848'106 at 150 MHz.
+constexpr std::uint64_t ticksPerWrap = std::uint64_t{1} << 24U;
+constexpr auto          fifteenYears = std::chrono::years(15);
+static_assert(calcOverRunValue(125'000'000,
+                               ticksPerWrap,
+                               fifteenYears)
+              == 3'526'764'215ULL);
+static_assert(calcOverRunValue(150'000'000,
+                               ticksPerWrap,
+                               fifteenYears)
+              == 4'232'117'083ULL);
+static_assert(std::is_same_v<OverrunWordT<calcOverRunValue(125'000'000,
+                                                           ticksPerWrap,
+                                                           fifteenYears)>,
+                             std::uint32_t>);
+static_assert(std::is_same_v<OverrunWordT<calcOverRunValue(150'000'000,
+                                                           ticksPerWrap,
+                                                           fifteenYears)>,
+                             std::uint32_t>);
+// past ~152.2 MHz years(15) needs more than 2^32 - 1 wraps: 64 bits
+static_assert(std::is_same_v<OverrunWordT<calcOverRunValue(153'000'000,
+                                                           ticksPerWrap,
+                                                           fifteenYears)>,
+                             std::uint64_t>);
+static_assert(std::is_same_v<OverrunWordT<0xFFFF'FFFFULL>,
+                             std::uint32_t>);
+static_assert(std::is_same_v<OverrunWordT<0x1'0000'0000ULL>,
+                             std::uint64_t>);
+// rounded up: one nanosecond is one wrap
+static_assert(calcOverRunValue(125'000'000,
+                               ticksPerWrap,
+                               std::chrono::nanoseconds{1})
+              == 1U);
+
+// delay()'s chunks, recorded
+std::vector<std::uint32_t> chunks;
+
+struct RecordWait {
+    static void wait(std::uint32_t n) { chunks.push_back(n); }
+};
 
 struct SimTick {
     std::uint32_t reload;
@@ -67,7 +116,7 @@ int main() {
         wide.increment();
         check(wide.load() == 0x1'0000'0000ULL,
               "the low half wraps into the high one",
-              (long long)wide.load());
+              static_cast<long long>(wide.load()));
         wide.increment();
         check(wide.load() == 0x1'0000'0001ULL, "and counts on");
         OverrunCounter<std::uint32_t> narrow;
@@ -75,6 +124,37 @@ int main() {
         narrow.increment();
         check(narrow.load() == 2U, "the 32-bit counter");
     }
+
+    // delay_ticks' stop rule: counts gone (also across a reload), or the overrun counter says so.
+    check(!delayReached(500U, 400U, std::uint32_t{0}, 101U, reload), "100 counts of 101");
+    check(delayReached(500U, 399U, std::uint32_t{0}, 101U, reload), "101 counts of 101");
+    check(delayReached(10U, 909U, std::uint32_t{1}, 100U, reload),
+          "across a reload: 10 + 1000 - 909 = 101 counts");
+    check(!delayReached(10U, 920U, std::uint32_t{0}, 100U, reload),
+          "across a reload: 90 counts, no wrap counted yet");
+    check(delayReached(500U, 499U, std::uint32_t{2}, 900U, reload),
+          "two wraps: done whatever the counter says");
+    check(delayReached(500U, 499U, std::uint64_t{1}, 900U, reload),
+          "one wrap and the counter below its start");
+    check(!delayReached(500U, 600U, std::uint32_t{1}, 901U, reload),
+          "one wrap, the counter above its start: 900 counts gone of 901");
+    check(delayReached(0U, 0U, std::uint32_t{0}, 0U, reload), "a wait of 0 ends at once");
+
+    // delay(): waits of at most one chunk, the rest last (also 0 when the time is a whole number of chunks).
+    waitInChunks<RecordWait>(25U, 10U);
+    check(chunks == std::vector<std::uint32_t>{10U, 10U, 5U}, "25 in 10s");
+    chunks.clear();
+    waitInChunks<RecordWait>(20U, 10U);
+    check(chunks == std::vector<std::uint32_t>{10U, 10U, 0U}, "20 in 10s");
+    chunks.clear();
+    waitInChunks<RecordWait>(3U, 0xFF'FFFFU);
+    check(chunks == std::vector<std::uint32_t>{3U}, "below one reload: one wait");
+    chunks.clear();
+    waitInChunks<RecordWait>(std::uint64_t{0xFF'FFFFU} * 3U + 7U, 0xFF'FFFFU);
+    check(chunks.size() == 4U && chunks.back() == 7U,
+          "three reloads and 7",
+          static_cast<long long>(chunks.size()));
+    chunks.clear();
 
     // Every instant of four periods, latencies up to 40 % of a reload, sample gaps up to 3 ticks.
     long long accepted = 0;

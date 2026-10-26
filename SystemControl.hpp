@@ -1,10 +1,12 @@
 #pragma once
 
-#include "chip/Interrupt.hpp"
+#include "core/Barrier.hpp"
 #include "core/CoreInterrupts.hpp"
+#include "core/Special.hpp"
 #include "core_peripherals/SCB.hpp"
 #include "cortex_common/Nvic.hpp"
 #include "kvasir/Common/Interrupt.hpp"
+#include "kvasir/Port/Interrupts.hpp"
 #include "kvasir/Register/Utility.hpp"
 #include "kvasir/StartUp/Resources.hpp"
 
@@ -20,6 +22,18 @@ namespace SystemControl {
     using SystemReset = decltype(Kvasir::Peripheral::SCB::Registers<>::AIRCR::overrideDefaults(
       write(Kvasir::Peripheral::SCB::Registers<>::AIRCR::VECTKEYValC::request_reset),
       write(Kvasir::Peripheral::SCB::Registers<>::AIRCR::SYSRESETREQValC::request_reset)));
+
+    // The system reset request and the wait for it: AIRCR = VECTKEY | SYSRESETREQ, then "DSB; Loop B Loop", since the
+    // reset need not take place at once (DDI0419E B1.5.16, md l.7746-7754; DDI0403E B1.5.16, md l.19113-19131;
+    // DDI0553B.y B1.1 RHFRS, md l.3142); the DSB before it lets the stores in flight finish first. Registers only and
+    // always inlined: a start that runs before RAM is set up calls it too. Nothing announced (a chip's reboot() does
+    // that first).
+    [[noreturn]] [[gnu::always_inline]] inline void resetNow() {
+        Kvasir::Core::dsb();
+        apply(SystemReset{});
+        Kvasir::Core::dsb();
+        while(true) {}
+    }
 }   // namespace SystemControl
 
 namespace Nvic {
@@ -27,76 +41,29 @@ namespace Nvic {
     namespace Detail { using ScbRegs = Kvasir::Peripheral::SCB::Registers<>; }
 
     // ICSR bits are write-one: written over the defaults, never read-modify-write.
+    // SysTick is a core exception and needs no chip at all; no core rule refuses it an action (it is in none of
+    // Core::InterruptRules' no* lists on any profile, InterruptRules.hpp), so its actions check only the level.
 
-    template<>
-    struct MakeAction<Action::SetPending, Index<Interrupt::systick.index()>>
+    template<int I>
+        requires(I == CoreInterrupts::systick.value)
+    struct MakeAction<Action::SetPending, Index<I>>
       : decltype(Detail::ScbRegs::ICSR::overrideDefaults(
-          write(Detail::ScbRegs::ICSR::PENDSTSETValC::set_pending))) {
-        static_assert(
-          Detail::interruptIndexValid(Interrupt::systick.index(),
-                                      std::begin(InterruptOffsetTraits<void>::noSetPending),
-                                      std::end(InterruptOffsetTraits<void>::noSetPending)),
-          "Unable to set pending on this interrupt, index is out of range");
-    };
+          write(Detail::ScbRegs::ICSR::PENDSTSETValC::set_pending))){};
 
-    template<>
-    struct MakeAction<Action::ClearPending, Index<Interrupt::systick.index()>>
+    template<int I>
+        requires(I == CoreInterrupts::systick.value)
+    struct MakeAction<Action::ClearPending, Index<I>>
       : decltype(Detail::ScbRegs::ICSR::overrideDefaults(
-          write(Detail::ScbRegs::ICSR::PENDSTCLRValC::clear))) {
-        static_assert(
-          Detail::interruptIndexValid(Interrupt::systick.index(),
-                                      std::begin(InterruptOffsetTraits<void>::noClearPending),
-                                      std::end(InterruptOffsetTraits<void>::noClearPending)),
-          "Unable to clear pending on this interrupt, index is out of range");
-    };
-
-    template<>
-    struct MakeAction<Action::SetPending, Index<Interrupt::pendSV.index()>>
-      : decltype(Detail::ScbRegs::ICSR::overrideDefaults(
-          write(Detail::ScbRegs::ICSR::PENDSVSETValC::set_pending))) {
-        static_assert(
-          Detail::interruptIndexValid(Interrupt::pendSV.index(),
-                                      std::begin(InterruptOffsetTraits<void>::noSetPending),
-                                      std::end(InterruptOffsetTraits<void>::noSetPending)),
-          "Unable to set pending on this interrupt, index is out of range");
-    };
-
-    template<>
-    struct MakeAction<Action::ClearPending, Index<Interrupt::pendSV.index()>>
-      : decltype(Detail::ScbRegs::ICSR::overrideDefaults(
-          write(Detail::ScbRegs::ICSR::PENDSVCLRValC::clear))) {
-        static_assert(
-          Detail::interruptIndexValid(Interrupt::pendSV.index(),
-                                      std::begin(InterruptOffsetTraits<void>::noClearPending),
-                                      std::end(InterruptOffsetTraits<void>::noClearPending)),
-          "Unable to clear pending on this interrupt, index is out of range");
-    };
-
-    template<>
-    struct MakeAction<Action::SetPending, Index<Interrupt::nonMaskableInt.index()>>
-      : decltype(Detail::ScbRegs::ICSR::overrideDefaults(
-          write(Detail::ScbRegs::ICSR::NMIPENDSETValC::set_pending))) {
-        static_assert(
-          Detail::interruptIndexValid(Interrupt::nonMaskableInt.index(),
-                                      std::begin(InterruptOffsetTraits<void>::noSetPending),
-                                      std::end(InterruptOffsetTraits<void>::noSetPending)),
-          "Unable to set pending on this interrupt, index is out of range");
-    };
+          write(Detail::ScbRegs::ICSR::PENDSTCLRValC::clear))){};
 
     namespace Detail {
+        // A core exception's level in its SHPR field (SysTick's: SHPR3 PRI_15)
         template<int         Priority,
-                 int         Interrupt,
                  auto const& Field>
         constexpr auto setHandlerPriority() {
-            static_assert(Priority >= 0 && unsigned(Priority) <= Detail::maxPriority(Field),
-                          "interrupt priority out of range for this core: 0-3 on a Cortex-M0+, "
-                          "0-15 on the RP2350's Cortex-M33");
-            static_assert(
-              Detail::interruptIndexValid(Interrupt,
-                                          std::begin(InterruptOffsetTraits<void>::noSetPriority),
-                                          std::end(InterruptOffsetTraits<void>::noSetPriority)),
-              "Unable to set priority on this interrupt, index is out of range");
-            return write(Field, Register::value<Priority>());
+            constexpr unsigned level
+              = Detail::checkedPriority<Priority, Detail::maxPriority(Field)>();
+            return write(Field, Register::value<level>());
         }
 
         // Word `index` of a register run, read through the register layer: a word access whatever
@@ -107,7 +74,7 @@ namespace Nvic {
             std::uint32_t word{};
             unsigned      i{};
             (void)(((i++ == index)
-                    && (word = Register::Detail::GetAddress<typename Regs::Addr>::read(), true))
+                    && (word = Register::RegisterTraits<typename Regs::Addr>::read(), true))
                    || ...);
             return word;
         }
@@ -118,8 +85,8 @@ namespace Nvic {
         }
 
         // The IPR words the chip's interrupts reach.
-        using IprWords = decltype(iprList(
-          std::make_index_sequence<(InterruptOffsetTraits<void>::end + 3) / 4>{}));
+        template<typename Traits = InterruptOffsetTraits<Kvasir::Tag::User>>
+        using IprWordsFor = decltype(iprList(std::make_index_sequence<(Traits::end + 3) / 4>{}));
 
         // SHPR words from the one holding exception 4 * first; SHPR1 (exceptions 4..7) is not on a
         // Cortex-M0+, which has none of those exceptions.
@@ -138,45 +105,43 @@ namespace Nvic {
     }   // namespace Detail
 
     template<int Priority>
-    struct MakeAction<Action::SetPriority<Priority>, Index<Interrupt::systick.index()>>
-      : decltype(Detail::setHandlerPriority<Priority,
-                                            Interrupt::systick.index(),
-                                            Detail::ScbRegs::SHPR3::pri_15>()) {};
+    struct MakeAction<Action::SetPriority<Priority>, Index<CoreInterrupts::systick.value>>
+      : decltype(Detail::setHandlerPriority<Priority, Detail::ScbRegs::SHPR3::pri_15>()) {};
 
-    template<int Priority>
-    struct MakeAction<Action::SetPriority<Priority>, Index<Interrupt::pendSV.index()>>
-      : decltype(Detail::setHandlerPriority<Priority,
-                                            Interrupt::pendSV.index(),
-                                            Detail::ScbRegs::SHPR3::pri_14>()) {};
-
-    template<int Priority>
-    struct MakeAction<Action::SetPriority<Priority>, Index<Interrupt::sVCall.index()>>
-      : decltype(Detail::setHandlerPriority<Priority,
-                                            Interrupt::sVCall.index(),
-                                            Detail::ScbRegs::SHPR2::pri_11>()) {};
-
-    // Priority level of the running exception: NMI -2, HardFault -1, thread mode 0.
-    struct ActiveIsrPriority {
-        static int operator()() {
-            std::uint32_t ipsr{};
-            asm volatile("mrs %0, ipsr" : "=r"(ipsr));
+    namespace Detail {
+        // The level of exception `ipsr` (IPSR's exception number) from the IPR/SHPR words:
+        // thread mode 0, NMI -2, HardFault -1. Kept apart from ActiveIsrPriority's IPSR read, so
+        // the host register mock can drive it (tests/decoders).
+        template<typename Traits = InterruptOffsetTraits<Kvasir::Tag::User>>
+        [[gnu::always_inline]] inline int activePriority(std::uint32_t ipsr) {
             if(ipsr == 0) { return 0; }
             if(ipsr < 4) { return static_cast<int>(ipsr) - 4; }
             // The word and its byte lane, not a byte load: on the Cortex-M0+ "all NVIC registers are
             // only accessible using word transfers. Any attempt to read or write a halfword or byte
-            // individually is unpredictable" (RP2040 datasheet 2.4.5.1 "About the NVIC"), and the same
-            // for "all system control registers" (2.4.4.1), SHPR2/3 among them. A byte load there read
+            // individually is unpredictable" (Cortex-M0+ TRM DDI0484C 5.1 "About the NVIC", md
+            // l.1235), and the same for "all system control registers" (4.2, Table 4-1 note, md
+            // l.1164), SHPR2/3 among them. A byte load there read
             // a wrong level, and a per-level ISR policy then dropped every interrupt's log record as
             // from a silent level.
             // IPR<n> holds IRQs 4n..4n+3 (exceptions 16+4n..), SHPRk exceptions 4k..4k+3: the lane is
             // ipsr % 4 in both. An exception before the first SHPR word wraps the index and reads 0.
             using Shpr = Detail::ShprWords<Detail::ScbRegs>;
             std::uint32_t const word
-              = ipsr >= 16 ? Detail::readWord(ipsr / 4 - 4, Detail::IprWords{})
+              = ipsr >= 16 ? Detail::readWord(ipsr / 4 - 4, Detail::IprWordsFor<Traits>{})
                            : Detail::readWord(ipsr / 4 - Shpr::first, typename Shpr::type{});
             auto const     byte = static_cast<std::uint8_t>(word >> (8U * (ipsr % 4)));
-            constexpr auto mask = Detail::NvicRegs::IPR<0>::template PRI<0>::pri.Mask;
+            constexpr auto mask = Detail::NvicRegs::IPR<0>::template PRI<0>::pri.mask;
             return static_cast<int>(byte >> std::countr_zero(mask));
+        }
+    }   // namespace Detail
+
+    // Priority level of the running exception: NMI -2, HardFault -1, thread mode 0.
+    // A template so the chip's traits are read where it is called (uc_log's PerLevel policy calls
+    // `ActivePriorityFunction{}()` inside a template).
+    struct ActiveIsrPriority {
+        template<typename Traits = InterruptOffsetTraits<Kvasir::Tag::User>>
+        static int operator()() {
+            return Detail::activePriority<Traits>(Kvasir::Core::ipsr());
         }
     };
 }   // namespace Nvic
@@ -187,8 +152,7 @@ namespace Startup {
         inline constexpr unsigned shpr1Address = Nvic::Detail::ScbRegs::SHPR2::Addr::value - 4U;
 
         constexpr bool isShprAddress(unsigned address) {
-            return address >= shpr1Address && address <= shpr1Address + 8U
-                && (address - shpr1Address) % 4U == 0;
+            return inWordRun(address, shpr1Address, 3U);
         }
 
         template<unsigned Addr>
@@ -203,33 +167,11 @@ namespace Startup {
              unsigned Mask,
              typename Access,
              typename FieldType,
-             unsigned Value>
-        requires(Detail::isShprAddress(Addr))
-    struct PriorityOfAction<Register::Action<
-      Register::
-        FieldLocation<Register::Address<Addr, Z, O, RegType, Mode>, Mask, Access, FieldType>,
-      Register::WriteLiteralAction<Value>>> {
-        using type
-          = decltype(Detail::lanePriorities<Detail::shprFirstIndex<Addr>, Mask, true, Value>(
-            std::make_integer_sequence<int, 4>{}));
-    };
-
-    template<unsigned Addr,
-             unsigned Z,
-             unsigned O,
-             typename RegType,
-             typename Mode,
-             unsigned Mask,
-             typename Access,
-             typename FieldType,
              typename TAction>
-        requires(Detail::isShprAddress(Addr) && Detail::writesUnknownValue<TAction>)
+        requires(Detail::isShprAddress(Addr) && Detail::setsPriority<TAction>)
     struct PriorityOfAction<Register::Action<
       Register::
         FieldLocation<Register::Address<Addr, Z, O, RegType, Mode>, Mask, Access, FieldType>,
-      TAction>> {
-        using type = decltype(Detail::lanePriorities<Detail::shprFirstIndex<Addr>, Mask, false, 0U>(
-          std::make_integer_sequence<int, 4>{}));
-    };
+      TAction>> : Detail::LanePriorities<Mask, Detail::shprFirstIndex<Addr>, TAction> {};
 }   // namespace Startup
 }   // namespace Kvasir

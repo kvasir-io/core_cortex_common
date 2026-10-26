@@ -1,5 +1,10 @@
 name: CI
 
+# test: the core-common host tests (tests/CMakeLists.txt), Kvasir_SDK package-host-tests.yml: gcc and clang, plain and
+# with ASan+UBSan. tests/CMakeLists.txt fetches what is not next to it: Kvasir_SDK (with svd_converter) and the three
+# core repositories for the decoder tests. irq_state_syntax (Special.hpp + InterruptMask.hpp for Armv6-M and Armv8-M,
+# -fsyntax-only) runs in the clang jobs: it is a clang --target check, the host compiler plays no part in it.
+
 on:
     push:
         branches:
@@ -11,39 +16,9 @@ on:
 
 jobs:
     test:
-        name: ${{ matrix.compiler.cc }}${{ matrix.compiler.sanitizer && ' asan+ubsan' || '' }}
-        runs-on: ubuntu-latest
-        container:
-            image: archlinux:latest
-        strategy:
-            fail-fast: false
-            matrix:
-                compiler:
-                    - {cc: gcc, cxx: g++}
-                    - {cc: gcc, cxx: g++, sanitizer: 'address,undefined'}
-                    - {cc: clang, cxx: clang++}
-                    - {cc: clang, cxx: clang++, sanitizer: 'address,undefined'}
+        uses: kvasir-io/Kvasir_SDK/.github/workflows/package-host-tests.yml@master
+        with: {sanitizers: true}
 
-        steps:
-            - name: Set up C++ environment
-              run: |
-                pacman -Syu --noconfirm
-                pacman -S --noconfirm cmake ninja base-devel ${{ matrix.compiler.cc == 'clang' && 'clang' || '' }}
-
-            # the host tests need only this repository's headers
-            - name: Checkout repository
-              uses: actions/checkout@v6
-
-            - name: Configure CMake
-              run: >
-                cmake -S tests -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-                ${{ matrix.compiler.sanitizer && format('"-DCMAKE_CXX_FLAGS=-fsanitize={0} -fno-sanitize-recover=all"', matrix.compiler.sanitizer) || '' }}
-              env:
-                CC: ${{ matrix.compiler.cc }}
-                CXX: ${{ matrix.compiler.cxx }}
-
-            - name: Build tests
-              run: cmake --build build -j"$(nproc)"
-
-            - name: Run tests
-              run: ctest --test-dir build --output-on-failure
+    # the include layering of this repository against Kvasir_SDK tools/layers.toml (any finding fails)
+    layers:
+        uses: kvasir-io/Kvasir_SDK/.github/workflows/package-layers.yml@master
