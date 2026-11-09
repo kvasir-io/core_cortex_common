@@ -22,6 +22,16 @@ namespace Kvasir::Systick::Detail {
     return std::uint64_t{reload - count} + wraps * (std::uint64_t{reload} + 1U);
 }
 
+// Ticks from `countStart` to `countNow` on the counter alone (counting down from `reload` to 0, then `reload` again):
+// right for an interval shorter than one reload (reload + 1 ticks); a longer one reads short by whole reloads.
+[[nodiscard,
+  gnu::always_inline]] constexpr std::uint32_t
+countsBetween(std::uint32_t countStart,
+              std::uint32_t countNow,
+              std::uint32_t reload) {
+    return countStart >= countNow ? countStart - countNow : countStart + (reload + 1U - countNow);
+}
+
 // A 64-bit count from its two halves, read high, low, high: a high half that moved in between
 // means the low half may belong to either, so retry.
 [[nodiscard]] constexpr std::optional<std::uint64_t> joinHalves(std::uint32_t hiBefore,

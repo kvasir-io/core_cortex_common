@@ -172,6 +172,43 @@ namespace Systick {
         // The counter without the epoch. Owning core only.
         static duration raw() { return rawNow(); }
 
+        /// Short intervals on the counter alone: one register read, where now() pairs the counter with the overrun
+        /// word and the pending flag (a retry loop and 64-bit arithmetic: several microseconds on a Cortex-M0+ with
+        /// the sanitizers). For microsecond work in a busy loop - a bit-banged protocol's slots (kvasir_devices
+        /// OneWire picks it up as its SlotTimer). since() is right for an interval shorter than one reload, 2^24
+        /// ticks (349 ms at 48 MHz, 112 ms at 150 MHz); a longer one reads short by whole reloads. wait() of that
+        /// long or longer is delay(). Any core: the counter is the core's own.
+        struct ShortInterval {
+            struct Stamp {
+                std::uint32_t count;
+            };
+
+            [[gnu::always_inline]] static Stamp stamp() {
+                return {apply(read(Regs::CVR::current))};
+            }
+
+            [[gnu::always_inline]] static duration since(Stamp start) {
+                return duration{
+                  static_cast<rep>(Detail::countsBetween(start.count,
+                                                         apply(read(Regs::CVR::current)),
+                                                         calcReloadValue()))};
+            }
+
+            /// Busy until `d` is over, from now.
+            template<typename Rep,
+                     typename Period>
+            static void wait(std::chrono::duration<Rep,
+                                                   Period> d) {
+                auto const start = stamp();
+                auto const ticks = std::chrono::duration_cast<duration>(d);
+                if(ticks.count() > rep{calcReloadValue()}) {
+                    SystickClockBase::delay(d);
+                    return;
+                }
+                while(since(start) < ticks) {}
+            }
+        };
+
         // Make now() read `referenceAt` where raw() read `rawAt`. Owning core only; the 64-bit
         // epoch is written with interrupts masked.
         static void syncTo(duration referenceAt,

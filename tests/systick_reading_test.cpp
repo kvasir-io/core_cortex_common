@@ -24,6 +24,7 @@ void check(bool        ok,
 }
 
 using Kvasir::Systick::Detail::calcOverRunValue;
+using Kvasir::Systick::Detail::countsBetween;
 using Kvasir::Systick::Detail::delayReached;
 using Kvasir::Systick::Detail::joinHalves;
 using Kvasir::Systick::Detail::OverrunCounter;
@@ -123,6 +124,24 @@ int main() {
         narrow.increment();
         narrow.increment();
         check(narrow.load() == 2U, "the 32-bit counter");
+    }
+
+    // ShortInterval::since(): the counts between two readings of the down-counter, across a reload too.
+    check(countsBetween(500U, 400U, reload) == 100U,
+          "100 counts down",
+          countsBetween(500U, 400U, reload),
+          100);
+    check(countsBetween(500U, 500U, reload) == 0U, "the same reading: 0");
+    check(countsBetween(10U, 909U, reload) == 101U,
+          "across a reload: 10 + 1000 - 909 = 101",
+          countsBetween(10U, 909U, reload),
+          101);
+    check(countsBetween(0U, reload, reload) == 1U, "0 to reload: one count");
+    check(countsBetween(reload, 0U, reload) == reload, "a full reload but one: reload counts");
+    {
+        constexpr std::uint32_t full = (1U << 24U) - 1U;   // the real SysTick, 2^24 counts a reload
+        check(countsBetween(5U, full - 4U, full) == 10U, "24 bits, across a reload: 10");
+        static_assert(countsBetween(5U, (1U << 24U) - 5U, (1U << 24U) - 1U) == 10U, "constexpr");
     }
 
     // delay_ticks' stop rule: counts gone (also across a reload), or the overrun counter says so.
